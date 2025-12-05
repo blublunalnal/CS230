@@ -36,7 +36,7 @@ def get_test_args():
     parser.add_argument("--model_name", type=str, default="", 
                         help="model name/identifier for logging")
     # load the model with shared layer
-    parser.add_argument("--shared_layer", action= "store_true", help= "load multi-task model with a shared layer")
+    parser.add_argument("--shared_layer", action="store_true", help="load multi-task model with a shared layer")
 
     return parser.parse_args()
 
@@ -72,7 +72,7 @@ def calculate_extended_metrics(labels, probs, preds):
     
     return metrics
 
-def log_to_csv(args, meta_metrics, status_acc, status_auc):
+def log_to_csv(args, meta_metrics, status_acc, status_auc, note):
     """
     Log evaluation results to CSV file (append mode).
     Creates the file with headers if it doesn't exist.
@@ -102,13 +102,14 @@ def log_to_csv(args, meta_metrics, status_acc, status_auc):
         # Status metrics
         'status_accuracy': status_acc,
         'status_auc_macro': status_auc,
+        'note': note
     }
     
     # Define column order
     fieldnames = [
         'timestamp', 'model_name', 'checkpoint_path', 'backbone', 'image_only', 'dropout', 
         'meta_accuracy', 'meta_auc', 'meta_f1', 'meta_sensitivity', 'meta_specificity', 
-        'meta_ppv', 'meta_npv', 'status_accuracy', 'status_auc_macro'
+        'meta_ppv', 'meta_npv', 'status_accuracy', 'status_auc_macro', 'note'
     ]
     
     # Write to CSV
@@ -121,10 +122,12 @@ def log_to_csv(args, meta_metrics, status_acc, status_auc):
         
         writer.writerow(row_data)
     
-    print(f"\n Results logged to: {csv_path}")
+    print(f"\nResults logged to: {csv_path}")
     
 def patient_level_metrics(agg_df):
-
+    """
+    Aggregate predictions and labels at patient level.
+    """
     status_labels = []
     meta_labels = []
     meta_preds = []
@@ -134,13 +137,19 @@ def patient_level_metrics(agg_df):
     
     for p in agg_df['patient_id'].unique():
         patient_row = agg_df[agg_df['patient_id'] == p]
-        meta_labels.append(np.max(patient_row['meta_label']))
-        status_labels.append(np.max(patient_row['status_label']))
+        meta_labels.append(int(np.max(patient_row['meta_label'])))
+        status_labels.append(int(np.max(patient_row['status_label'])))
         # if 1 instance of the patient is positive, then the patient is positive
-        meta_preds.append(np.max(patient_row['meta_preds']))
-        status_preds.append(st.mode(patient_row['status_preds']))
-        meta_probs.append(np.mean(patient_row['meta_probs']))
-        status_probs.append(np.mean(patient_row['status_probs']))
+        meta_preds.append(int(np.max(patient_row['meta_preds'])))
+        # Use mode for status predictions
+        status_mode = st.mode(patient_row['status_preds'], keepdims=False)
+        status_preds.append(int(status_mode.mode))
+        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        # For status probs, need to handle multi-class properly
+        status_probs.append(np.mean(patient_row['status_probs'].tolist(), axis=0))
+    
+    # Convert status_probs to numpy array
+    status_probs = np.array(status_probs)
     
     return meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds
 
@@ -151,6 +160,7 @@ def test(model, dataloader, args):
     meta_preds, meta_labels, meta_probs = [], [], []
     status_preds, status_labels, status_probs = [], [], []
     patient_ids = []
+    
     print("Running Inference on Test Set...")
     with torch.no_grad():
         for data in tqdm(dataloader, ncols=100):
@@ -165,7 +175,7 @@ def test(model, dataloader, args):
             else:
                 meta_logits, status_logits, _ = model(bag_tensor, clinical_data)
             
-            #  Metastasis (Binary) 
+            # Metastasis (Binary) 
             meta_prob = torch.softmax(meta_logits, dim=1)[:, 1] # Probability of class 1
             meta_pred = torch.argmax(meta_logits, dim=1)
 
@@ -191,11 +201,11 @@ def test(model, dataloader, args):
     status_preds = np.array(status_preds)
     status_labels = np.array(status_labels)
     
-    
-    def log_compute_metrics(meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds, note = "per bag level" ):
-        # Compute Metrics 
-        
-        print(note)
+    def log_compute_metrics(meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds, note="per bag level"):
+        """
+        Compute and log metrics for both tasks.
+        """
+        print(f"\n{note}")
         print("\n" + "="*30)
         print("  METASTASIS (Binary) RESULTS  ")
         print("="*30)
@@ -209,30 +219,73 @@ def test(model, dataloader, args):
         print("  STATUS (Multiclass) RESULTS  ")
         print("="*30)
         
-    
         status_acc = accuracy_score(status_labels, status_preds)
         try:
             status_auc = roc_auc_score(status_labels, status_probs, multi_class='ovr', average='macro')
-        except:
+        except Exception as e:
+            print(f"Warning: Could not compute AUC for status task: {e}")
             status_auc = 0.0
             
         print(f"Accuracy       : {status_acc:.4f}")
         print(f"AUC (Macro)    : {status_auc:.4f}")
-        # print("\nClassification Report:")
-        # print(classification_report(status_labels, status_preds, digits=4))
-        log_to_csv(args, meta_metrics, status_acc, status_auc)
+        print("\nClassification Report:")
+        print(classification_report(status_labels, status_preds, digits=4))
         
-    log_compute_metrics(meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds, note = "per bag level")
+        return meta_metrics, status_acc, status_auc
         
+    # Bag-level metrics
+    meta_metrics_bag, status_acc_bag, status_auc_bag = log_compute_metrics(
+        meta_labels, meta_probs, meta_preds, 
+        status_labels, status_probs, status_preds, 
+        note="PER BAG LEVEL"
+    )
     
+    # Log bag-level results to CSV
+    log_to_csv(args, meta_metrics_bag, status_acc_bag, status_auc_bag, note = "PER BAG LEVEL")
     
+    # Patient-level aggregation
+    agg_dict = {
+        'patient_id': patient_ids, 
+        'meta_probs': meta_probs,
+        'meta_preds': meta_preds,
+        'status_preds': status_preds,
+        'meta_label': meta_labels,
+        'status_label': status_labels,
+        'status_probs': list(status_probs)  # Store as list for patient-level aggregation
+    }
+    agg_df = pd.DataFrame(agg_dict)
     
+    # Get patient-level metrics
+    meta_labels_patient, meta_probs_patient, meta_preds_patient, \
+    status_labels_patient, status_probs_patient, status_preds_patient = patient_level_metrics(agg_df)
+    
+    # Patient-level metrics
+    meta_metrics_patient, status_acc_patient, status_auc_patient = log_compute_metrics(
+        meta_labels_patient, meta_probs_patient, meta_preds_patient, 
+        status_labels_patient, status_probs_patient, status_preds_patient, 
+        note="PER PATIENT LEVEL"
+    )
+    
+    # log to csv patient-level matrics
+    log_to_csv(args, meta_metrics_patient, status_acc_patient, status_auc_patient, note = "PER PATIENT LEVEL")
+    
+   
+
 if __name__ == "__main__":
     args = get_test_args()
     
-
-    test_dataset = BreastDataset(args.test_json_path, args.data_dir_path, args.clinical_data_path, is_preloading=args.preloading)
-    test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers)
+    test_dataset = BreastDataset(
+        args.test_json_path, 
+        args.data_dir_path, 
+        args.clinical_data_path, 
+        is_preloading=args.preloading
+    )
+    test_loader = torch.utils.data.DataLoader(
+        dataset=test_dataset, 
+        batch_size=1, 
+        shuffle=False, 
+        num_workers=args.num_workers
+    )
     
     # Initialize Model
     print(f"Initializing model with backbone: {args.backbone}")
@@ -252,6 +305,5 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
         raise FileNotFoundError(f"No checkpoint found at {args.checkpoint_path}")
-        
     
     test(model, test_loader, args)
