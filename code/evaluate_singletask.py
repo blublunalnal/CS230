@@ -4,7 +4,8 @@ import os
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, confusion_matrix, classification_report
 from tqdm import tqdm
-
+import csv
+from datetime import datetime
 from mil_net import Singletask_MILNET
 from backbone_builder import BACKBONES
 from dataset_loader import BreastDataset
@@ -26,6 +27,12 @@ def get_test_args():
     # Checkpoint
     parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to best_combined.pth or best_meta.pth")
     parser.add_argument("--num_workers", type=int, default=8)
+    
+    # for logging
+    parser.add_argument("--csv_log_path", type=str, default="./evaluation_results.csv", 
+                        help="Path to CSV file for logging results (will append if exists)")
+    parser.add_argument("--model_name", type=str, default="", 
+                        help="model name/identifier for logging")
 
     return parser.parse_args()
 
@@ -60,6 +67,59 @@ def calculate_extended_metrics(labels, probs, preds):
     metrics['npv'] = tn / (tn + fn) if (tn + fn) > 0 else 0.0
     
     return metrics
+
+def log_to_csv(args, meta_metrics):
+    """
+    Log evaluation results to CSV file (append mode).
+    Creates the file with headers if it doesn't exist.
+    """
+    csv_path = args.csv_log_path
+    file_exists = os.path.isfile(csv_path)
+    
+    # Prepare row data
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    model_identifier = args.model_name if args.model_name else os.path.basename(args.checkpoint_path)
+    
+    row_data = {
+        'timestamp': timestamp,
+        'model_name': model_identifier,
+        'checkpoint_path': args.checkpoint_path,
+        'backbone': args.backbone,
+        'image_only': 'NA',
+        'dropout': args.dropout,
+        # Metastasis metrics
+        'meta_accuracy': meta_metrics['accuracy'],
+        'meta_auc': meta_metrics['auc'],
+        'meta_f1': meta_metrics['f1'],
+        'meta_sensitivity': meta_metrics['sensitivity'],
+        'meta_specificity': meta_metrics['specificity'],
+        'meta_ppv': meta_metrics['ppv'],
+        'meta_npv': meta_metrics['npv'],
+        # Status metrics
+        'status_accuracy': 'N/A',
+        'status_auc_macro': 'N/A',
+    }
+    
+   
+    fieldnames = [
+        'timestamp', 'model_name', 'checkpoint_path', 'backbone', 'image_only', 'dropout', 
+        'meta_accuracy', 'meta_auc', 'meta_f1', 'meta_sensitivity', 'meta_specificity', 
+        'meta_ppv', 'meta_npv', 'status_accuracy', 'status_auc_macro'
+    ]
+    
+    # Write to CSV
+    with open(csv_path, 'a', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        # Write header if file is new
+        if not file_exists:
+            writer.writeheader()
+        
+        writer.writerow(row_data)
+    
+    print(f"\n Results logged to: {csv_path}")
+    
+
 
 def test(model, dataloader, args):
     model.eval()
@@ -105,6 +165,8 @@ def test(model, dataloader, args):
     
     for k, v in meta_metrics.items():
         print(f"{k.upper():<15}: {v:.4f}")
+        
+    log_to_csv(args, meta_metrics)
 
  
     
@@ -112,18 +174,17 @@ def test(model, dataloader, args):
 if __name__ == "__main__":
     args = get_test_args()
     
-    # 1. Load Dataset
+
     test_dataset = BreastDataset(args.test_json_path, args.data_dir_path, args.clinical_data_path, is_preloading=args.preloading)
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers)
-    
-    # 2. Initialize Model
+   
     print(f"Initializing model with backbone: {args.backbone}")
  
     model = Singletask_MILNET(backbone_name=args.backbone, dropout=args.dropout)
     
     model = model.cuda()
     
-    # 3. Load Checkpoint
+  
     if os.path.isfile(args.checkpoint_path):
         print(f"Loading weights from: {args.checkpoint_path}")
         checkpoint = torch.load(args.checkpoint_path, weights_only=False)
@@ -131,5 +192,5 @@ if __name__ == "__main__":
     else:
         raise FileNotFoundError(f"No checkpoint found at {args.checkpoint_path}")
         
-    # 4. Run Test
+  
     test(model, test_loader, args)

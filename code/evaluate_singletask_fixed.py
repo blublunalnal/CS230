@@ -6,11 +6,10 @@ from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, confusion_m
 from tqdm import tqdm
 import csv
 from datetime import datetime
-from mil_net import Multitask_MILNET, Multitask_MILNET_image_only, Multitask_MILNET_shared_layer
+from mil_net import Singletask_MILNET
 from backbone_builder import BACKBONES
 from dataset_loader import BreastDataset
 import pandas as pd
-from scipy import stats as st
 
 def get_test_args():
     parser = argparse.ArgumentParser(description="Evaluation Script")
@@ -24,19 +23,17 @@ def get_test_args():
     # Model args (Must match the trained model settings)
     parser.add_argument("--backbone", choices=BACKBONES, default="vgg16_bn")
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--image_only", action="store_true")
+   
     
     # Checkpoint
     parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to best_combined.pth or best_meta.pth")
     parser.add_argument("--num_workers", type=int, default=8)
     
-    # log to csv
+    # for logging
     parser.add_argument("--csv_log_path", type=str, default="./evaluation_results.csv", 
                         help="Path to CSV file for logging results (will append if exists)")
     parser.add_argument("--model_name", type=str, default="", 
                         help="model name/identifier for logging")
-    # load the model with shared layer
-    parser.add_argument("--shared_layer", action= "store_true", help= "load multi-task model with a shared layer")
 
     return parser.parse_args()
 
@@ -72,7 +69,7 @@ def calculate_extended_metrics(labels, probs, preds):
     
     return metrics
 
-def log_to_csv(args, meta_metrics, status_acc, status_auc):
+def log_to_csv(args, meta_metrics, note):
     """
     Log evaluation results to CSV file (append mode).
     Creates the file with headers if it doesn't exist.
@@ -89,7 +86,7 @@ def log_to_csv(args, meta_metrics, status_acc, status_auc):
         'model_name': model_identifier,
         'checkpoint_path': args.checkpoint_path,
         'backbone': args.backbone,
-        'image_only': args.image_only,
+        'image_only': 'NA',
         'dropout': args.dropout,
         # Metastasis metrics
         'meta_accuracy': meta_metrics['accuracy'],
@@ -100,15 +97,15 @@ def log_to_csv(args, meta_metrics, status_acc, status_auc):
         'meta_ppv': meta_metrics['ppv'],
         'meta_npv': meta_metrics['npv'],
         # Status metrics
-        'status_accuracy': status_acc,
-        'status_auc_macro': status_auc,
+        'status_accuracy': 'N/A',
+        'status_auc_macro': 'N/A',
+        'note': note
     }
     
-    # Define column order
     fieldnames = [
         'timestamp', 'model_name', 'checkpoint_path', 'backbone', 'image_only', 'dropout', 
         'meta_accuracy', 'meta_auc', 'meta_f1', 'meta_sensitivity', 'meta_specificity', 
-        'meta_ppv', 'meta_npv', 'status_accuracy', 'status_auc_macro'
+        'meta_ppv', 'meta_npv', 'status_accuracy', 'status_auc_macro', 'note'
     ]
     
     # Write to CSV
@@ -121,64 +118,51 @@ def log_to_csv(args, meta_metrics, status_acc, status_auc):
         
         writer.writerow(row_data)
     
-    print(f"\n Results logged to: {csv_path}")
-    
-def patient_level_metrics(agg_df):
+    print(f"\nResults logged to: {csv_path}")
 
-    status_labels = []
+def patient_level_metrics(agg_df):
+    """
+    Aggregate predictions and labels at patient level.
+    For metastasis: if any bag from a patient is positive, the patient is positive.
+    """
     meta_labels = []
     meta_preds = []
-    status_preds = []
     meta_probs = []
-    status_probs = []
     
     for p in agg_df['patient_id'].unique():
         patient_row = agg_df[agg_df['patient_id'] == p]
-        meta_labels.append(np.max(patient_row['meta_label']))
-        status_labels.append(np.max(patient_row['status_label']))
-        # if 1 instance of the patient is positive, then the patient is positive
-        meta_preds.append(np.max(patient_row['meta_preds']))
-        status_preds.append(st.mode(patient_row['status_preds']))
-        meta_probs.append(np.mean(patient_row['meta_probs']))
-        status_probs.append(np.mean(patient_row['status_probs']))
+        # If any instance of the patient is positive, then the patient is positive
+        meta_labels.append(int(np.max(patient_row['meta_label'])))
+        meta_preds.append(int(np.max(patient_row['meta_preds'])))
+        # Average probability across all bags for this patient
+        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
     
-    return meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds
+    return meta_labels, meta_probs, meta_preds
 
 def test(model, dataloader, args):
     model.eval()
     
     # Arrays to store results
     meta_preds, meta_labels, meta_probs = [], [], []
-    status_preds, status_labels, status_probs = [], [], []
     patient_ids = []
+    
     print("Running Inference on Test Set...")
     with torch.no_grad():
         for data in tqdm(dataloader, ncols=100):
             bag_tensor = data["bag_tensor"].cuda()
             clinical_data = data["clinical_data"].cuda()
             metastasis_label = data["metastasis_label"].cuda()
-            status_label = data["status_label"].cuda()
             
             # Forward pass
-            if args.image_only:
-                meta_logits, status_logits, _ = model(bag_tensor)
-            else:
-                meta_logits, status_logits, _ = model(bag_tensor, clinical_data)
+            meta_logits, _ = model(bag_tensor, clinical_data)
             
-            #  Metastasis (Binary) 
+            # Metastasis (Binary)
             meta_prob = torch.softmax(meta_logits, dim=1)[:, 1] # Probability of class 1
             meta_pred = torch.argmax(meta_logits, dim=1)
-
+            
             meta_probs.extend(meta_prob.cpu().numpy())
             meta_preds.extend(meta_pred.cpu().numpy())
             meta_labels.extend(metastasis_label.cpu().numpy())
-            
-            # Status (Multiclass) 
-            status_prob = torch.softmax(status_logits, dim=1)
-            status_pred = torch.argmax(status_logits, dim=1)
-            status_probs.append(status_prob.cpu().numpy())
-            status_preds.extend(status_pred.cpu().numpy())
-            status_labels.extend(status_label.cpu().numpy())
             patient_ids.extend(data['patient_id'])
 
     # Convert to numpy
@@ -187,15 +171,11 @@ def test(model, dataloader, args):
     meta_labels = np.array(meta_labels)
     patient_ids = np.array(patient_ids)
     
-    status_probs = np.concatenate(status_probs, axis=0)
-    status_preds = np.array(status_preds)
-    status_labels = np.array(status_labels)
-    
-    
-    def log_compute_metrics(meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds, note = "per bag level" ):
-        # Compute Metrics 
-        
-        print(note)
+    def log_compute_metrics(meta_labels, meta_probs, meta_preds, note="PER BAG LEVEL"):
+        """
+        Compute and log metrics for metastasis task.
+        """
+        print(f"\n{note}")
         print("\n" + "="*30)
         print("  METASTASIS (Binary) RESULTS  ")
         print("="*30)
@@ -204,54 +184,47 @@ def test(model, dataloader, args):
         
         for k, v in meta_metrics.items():
             print(f"{k.upper():<15}: {v:.4f}")
+        
+        return meta_metrics
+    
+    # Bag-level metrics
+    meta_metrics_bag = log_compute_metrics(meta_labels, meta_probs, meta_preds, note="PER BAG LEVEL")
+    log_to_csv(args, meta_metrics_bag, note="PER BAG LEVEL")
+    
+    # Patient-level aggregation
+    agg_dict = {
+        'patient_id': patient_ids, 
+        'meta_probs': meta_probs,
+        'meta_preds': meta_preds,
+        'meta_label': meta_labels
+    }
+    agg_df = pd.DataFrame(agg_dict)
+    
+    # Get patient-level metrics
+    meta_labels_patient, meta_probs_patient, meta_preds_patient = patient_level_metrics(agg_df)
+    
+    # Patient-level metrics
+    meta_metrics_patient = log_compute_metrics(
+        meta_labels_patient, meta_probs_patient, meta_preds_patient, 
+        note="PER PATIENT LEVEL"
+    )
+    log_to_csv(args, meta_metrics_patient, note="PER PATIENT LEVEL")
 
-        print("\n" + "="*30)
-        print("  STATUS (Multiclass) RESULTS  ")
-        print("="*30)
-        
-    
-        status_acc = accuracy_score(status_labels, status_preds)
-        try:
-            status_auc = roc_auc_score(status_labels, status_probs, multi_class='ovr', average='macro')
-        except:
-            status_auc = 0.0
-            
-        print(f"Accuracy       : {status_acc:.4f}")
-        print(f"AUC (Macro)    : {status_auc:.4f}")
-        # print("\nClassification Report:")
-        # print(classification_report(status_labels, status_preds, digits=4))
-        log_to_csv(args, meta_metrics, status_acc, status_auc)
-        
-    log_compute_metrics(meta_labels, meta_probs, meta_preds, status_labels, status_probs, status_preds, note = "per bag level")
-        
-    
-    
-    
 if __name__ == "__main__":
     args = get_test_args()
     
-
     test_dataset = BreastDataset(args.test_json_path, args.data_dir_path, args.clinical_data_path, is_preloading=args.preloading)
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers)
-    
-    # Initialize Model
+   
     print(f"Initializing model with backbone: {args.backbone}")
-    if args.image_only:
-        model = Multitask_MILNET_image_only(backbone_name=args.backbone, dropout=args.dropout)
-    elif args.shared_layer:
-        model = Multitask_MILNET_shared_layer(backbone_name=args.backbone, dropout=args.dropout)
-    else:
-        model = Multitask_MILNET(backbone_name=args.backbone, dropout=args.dropout)
-    
+    model = Singletask_MILNET(backbone_name=args.backbone, dropout=args.dropout)
     model = model.cuda()
     
-    # Load Checkpoint
     if os.path.isfile(args.checkpoint_path):
         print(f"Loading weights from: {args.checkpoint_path}")
         checkpoint = torch.load(args.checkpoint_path, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
     else:
         raise FileNotFoundError(f"No checkpoint found at {args.checkpoint_path}")
-        
     
     test(model, test_loader, args)
