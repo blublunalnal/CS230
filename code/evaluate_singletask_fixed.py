@@ -131,11 +131,12 @@ def patient_level_metrics(agg_df):
     
     for p in agg_df['patient_id'].unique():
         patient_row = agg_df[agg_df['patient_id'] == p]
+        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
         # If any instance of the patient is positive, then the patient is positive
-        meta_labels.append(int(np.max(patient_row['meta_label'])))
+        meta_labels.append(1 if float(np.mean(patient_row['meta_probs'])) > 0.5 else 0 ) #int(np.max(patient_row['meta_label']))
         meta_preds.append(int(np.max(patient_row['meta_preds'])))
         # Average probability across all bags for this patient
-        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+       # meta_probs.append(float(np.mean(patient_row['meta_probs'])))
     
     return meta_labels, meta_probs, meta_preds
 

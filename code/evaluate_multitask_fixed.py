@@ -139,12 +139,13 @@ def patient_level_metrics(agg_df):
         patient_row = agg_df[agg_df['patient_id'] == p]
         meta_labels.append(int(np.max(patient_row['meta_label'])))
         status_labels.append(int(np.max(patient_row['status_label'])))
-        # if 1 instance of the patient is positive, then the patient is positive
-        meta_preds.append(int(np.max(patient_row['meta_preds'])))
+       
+        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        meta_preds.append( 1 if float(np.mean(patient_row['meta_probs'])) > 0.5 else 0 ) # int(np.max(patient_row['meta_preds']))
         # Use mode for status predictions
         status_mode = st.mode(patient_row['status_preds'], keepdims=False)
         status_preds.append(int(status_mode.mode))
-        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        
         # For status probs, need to handle multi-class properly
         status_probs.append(np.mean(patient_row['status_probs'].tolist(), axis=0))
     
