@@ -62,7 +62,7 @@ def main():
     else:
         model = Multitask_MILNET(backbone_name=args.backbone, dropout=args.dropout)
     
-    checkpoint = torch.load(args.checkpoint_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+    checkpoint = torch.load(args.checkpoint_path, map_location='cuda' if torch.cuda.is_available() else 'cpu', weights_only= False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
