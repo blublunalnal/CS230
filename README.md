@@ -12,13 +12,14 @@ Attention module, as used in baseline work, see citation in file.
 Model Architecture - contains the baseline, multi-task and single-task model.
 
 ### train_multitask.py
-Train multi-task models
+Train multi-task models for mestasais status and stage; evaluated with `evaluation/evaluate_multitask.py`
 
 ### train_singletask.py
-Train single-task models
+Train single-task models for mestasais status ; evaluated with `evaluation/evaluate_singletask.py`
 
-### CS230_training_logs.py
-Contains each configuration and logs for training.
+### train_singletask_status.py
+Train single-task models for mestasais status ; evaluated with `evaluation/evaluate_singletask_status.py`
+
 
 ### code/dataset
 - clinical_data folder: pre-processed clinical data.

@@ -141,7 +141,7 @@ def patient_level_metrics(agg_df):
         status_labels.append(int(np.max(patient_row['status_label'])))
        
         meta_probs.append(float(np.mean(patient_row['meta_probs'])))
-        meta_preds.append( 1 if float(np.mean(patient_row['meta_probs'])) > 0.5 else 0 ) # int(np.max(patient_row['meta_preds']))
+        meta_preds.append( 1 if float(np.mean(patient_row['meta_probs'])) > 0.5 else 0 ) 
         # Use mode for status predictions
         status_mode = st.mode(patient_row['status_preds'], keepdims=False)
         status_preds.append(int(status_mode.mode))
@@ -224,13 +224,13 @@ def test(model, dataloader, args):
         try:
             status_auc = roc_auc_score(status_labels, status_probs, multi_class='ovr', average='macro')
         except Exception as e:
-            print(f"Warning: Could not compute AUC for status task: {e}")
+    
             status_auc = 0.0
             
         print(f"Accuracy       : {status_acc:.4f}")
-        print(f"AUC (Macro)    : {status_auc:.4f}")
+        print(f"AUC (macro)    : {status_auc:.4f}")
         print("\nClassification Report:")
-        print(classification_report(status_labels, status_preds, digits=4))
+    
         
         return meta_metrics, status_acc, status_auc
         
@@ -252,7 +252,7 @@ def test(model, dataloader, args):
         'status_preds': status_preds,
         'meta_label': meta_labels,
         'status_label': status_labels,
-        'status_probs': list(status_probs)  # Store as list for patient-level aggregation
+        'status_probs': list(status_probs)  
     }
     agg_df = pd.DataFrame(agg_dict)
     
@@ -288,7 +288,6 @@ if __name__ == "__main__":
         num_workers=args.num_workers
     )
     
-    # Initialize Model
     print(f"Initializing model with backbone: {args.backbone}")
     if args.image_only:
         model = Multitask_MILNET_image_only(backbone_name=args.backbone, dropout=args.dropout)
@@ -298,8 +297,7 @@ if __name__ == "__main__":
         model = Multitask_MILNET(backbone_name=args.backbone, dropout=args.dropout)
     
     model = model.cuda()
-    
-    # Load Checkpoint
+ 
     if os.path.isfile(args.checkpoint_path):
         print(f"Loading weights from: {args.checkpoint_path}")
         checkpoint = torch.load(args.checkpoint_path, weights_only=False)
