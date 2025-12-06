@@ -173,7 +173,7 @@ def log_to_csv(args, meta_metrics, status_acc, status_auc, note, threshold_used)
     
     print(f"\nResults logged to: {csv_path}")
     
-def patient_level_metrics(agg_df):
+def patient_level_metrics(agg_df, meta_threshold):
     """
     Aggregate predictions and labels at patient level.
     """
@@ -186,14 +186,15 @@ def patient_level_metrics(agg_df):
     
     for p in agg_df['patient_id'].unique():
         patient_row = agg_df[agg_df['patient_id'] == p]
-        meta_labels.append(int(np.max(patient_row['meta_label'])))
+        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        meta_labels.append(1 if float(np.mean(patient_row['meta_probs'])) > meta_threshold else 0) #int(np.max(patient_row['meta_label']))
         status_labels.append(int(np.max(patient_row['status_label'])))
         # if 1 instance of the patient is positive, then the patient is positive
         meta_preds.append(int(np.max(patient_row['meta_preds'])))
         # Use mode for status predictions
         status_mode = st.mode(patient_row['status_preds'], keepdims=False)
         status_preds.append(int(status_mode.mode))
-        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        
         # For status probs, need to handle multi-class properly
         status_probs.append(np.mean(patient_row['status_probs'].tolist(), axis=0))
     
@@ -313,7 +314,7 @@ def test(model, dataloader, args, meta_threshold=0.5):
         'status_label': status_labels,
         'status_probs': list(status_probs)  # Store as list for patient-level aggregation
     }
-    agg_df = pd.DataFrame(agg_dict)
+    agg_df = pd.DataFrame(agg_dict, meta_threshold)
     
     # Get patient-level metrics
     meta_labels_patient, meta_probs_patient, meta_preds_patient, \

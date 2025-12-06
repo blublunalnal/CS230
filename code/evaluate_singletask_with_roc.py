@@ -2,7 +2,7 @@ import torch
 import argparse
 import os
 import numpy as np
-from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, confusion_matrix, classification_report
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, confusion_matrix, classification_report, roc_curve
 from tqdm import tqdm
 import csv
 from datetime import datetime
@@ -10,9 +10,12 @@ from mil_net import Singletask_MILNET
 from backbone_builder import BACKBONES
 from dataset_loader import BreastDataset
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import json
 
 def get_test_args():
-    parser = argparse.ArgumentParser(description="Evaluation Script")
+    parser = argparse.ArgumentParser(description="Evaluation Script with ROC Curve")
     
     # Dataset args
     parser.add_argument("--test_json_path", default="./dataset/json/updated_test-type-0.json")
@@ -24,7 +27,6 @@ def get_test_args():
     parser.add_argument("--backbone", choices=BACKBONES, default="vgg16_bn")
     parser.add_argument("--dropout", type=float, default=0.2)
    
-    
     # Checkpoint
     parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to best_combined.pth or best_meta.pth")
     parser.add_argument("--num_workers", type=int, default=8)
@@ -34,6 +36,12 @@ def get_test_args():
                         help="Path to CSV file for logging results (will append if exists)")
     parser.add_argument("--model_name", type=str, default="", 
                         help="model name/identifier for logging")
+    
+    # ROC curve options
+    parser.add_argument("--output_dir", type=str, default="./evaluation_outputs",
+                        help="Directory to save ROC curve plots")
+    parser.add_argument("--save_roc_data", action="store_true",
+                        help="Save ROC curve data (FPR, TPR, thresholds) as JSON")
 
     return parser.parse_args()
 
@@ -68,6 +76,110 @@ def calculate_extended_metrics(labels, probs, preds):
     metrics['npv'] = tn / (tn + fn) if (tn + fn) > 0 else 0.0
     
     return metrics
+
+def plot_confusion_matrix(labels, preds, output_path, title="Confusion Matrix - Metastasis Prediction", 
+                         class_names=None, normalize=False):
+    """
+    Plot and save confusion matrix.
+    
+    Args:
+        labels: Ground truth labels
+        preds: Predicted labels
+        output_path: Path to save the plot
+        title: Plot title
+        class_names: List of class names for labels
+        normalize: Whether to normalize the confusion matrix
+    """
+    if class_names is None:
+        class_names = ['Negative', 'Positive']
+    
+    # Compute confusion matrix
+    cm = confusion_matrix(labels, preds)
+    
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        fmt = '.2%'
+        title = title + " (Normalized)"
+    else:
+        fmt = 'd'
+    
+    # Create the plot
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt=fmt, cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names,
+                cbar_kws={'label': 'Count' if not normalize else 'Proportion'})
+    
+    plt.ylabel('True Label', fontsize=12)
+    plt.xlabel('Predicted Label', fontsize=12)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Confusion matrix saved to: {output_path}")
+
+def plot_roc_curve(labels, probs, output_path, title="ROC Curve - Metastasis Prediction", auc_score=None):
+    """
+    Plot and save ROC curve.
+    
+    Args:
+        labels: Ground truth labels
+        probs: Predicted probabilities
+        output_path: Path to save the plot
+        title: Plot title
+        auc_score: Pre-calculated AUC score (if None, will calculate)
+    """
+    # Calculate ROC curve
+    fpr, tpr, thresholds = roc_curve(labels, probs)
+    
+    if auc_score is None:
+        auc_score = roc_auc_score(labels, probs)
+    
+    # Create the plot
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc_score:.4f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random Classifier')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.legend(loc="lower right", fontsize=10)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"ROC curve saved to: {output_path}")
+    
+    return fpr, tpr, thresholds
+
+def save_roc_data(labels, probs, output_path, level="bag"):
+    """
+    Save ROC curve data as JSON for later analysis.
+    """
+    fpr, tpr, thresholds = roc_curve(labels, probs)
+    auc_score = roc_auc_score(labels, probs)
+    
+    roc_data = {
+        'level': level,
+        'auc': float(auc_score),
+        'fpr': fpr.tolist(),
+        'tpr': tpr.tolist(),
+        'thresholds': thresholds.tolist(),
+        'n_samples': len(labels),
+        'n_positive': int(np.sum(labels)),
+        'n_negative': int(len(labels) - np.sum(labels))
+    }
+    
+    with open(output_path, 'w') as f:
+        json.dump(roc_data, f, indent=2)
+    
+    print(f"ROC data saved to: {output_path}")
 
 def log_to_csv(args, meta_metrics, note):
     """
@@ -131,17 +243,19 @@ def patient_level_metrics(agg_df):
     
     for p in agg_df['patient_id'].unique():
         patient_row = agg_df[agg_df['patient_id'] == p]
-        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
         # If any instance of the patient is positive, then the patient is positive
-        meta_labels.append(1 if float(np.mean(patient_row['meta_probs'])) > 0.5 else 0 ) #int(np.max(patient_row['meta_label']))
+        meta_labels.append(int(np.max(patient_row['meta_label'])))
         meta_preds.append(int(np.max(patient_row['meta_preds'])))
         # Average probability across all bags for this patient
-       # meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        meta_probs.append(float(np.mean(patient_row['meta_probs'])))
     
     return meta_labels, meta_probs, meta_preds
 
 def test(model, dataloader, args):
     model.eval()
+    
+    # Create output directory for plots
+    os.makedirs(args.output_dir, exist_ok=True)
     
     # Arrays to store results
     meta_preds, meta_labels, meta_probs = [], [], []
@@ -172,7 +286,7 @@ def test(model, dataloader, args):
     meta_labels = np.array(meta_labels)
     patient_ids = np.array(patient_ids)
     
-    def log_compute_metrics(meta_labels, meta_probs, meta_preds, note="PER BAG LEVEL"):
+    def log_compute_metrics(meta_labels, meta_probs, meta_preds, note="PER BAG LEVEL", level="bag"):
         """
         Compute and log metrics for metastasis task.
         """
@@ -186,10 +300,50 @@ def test(model, dataloader, args):
         for k, v in meta_metrics.items():
             print(f"{k.upper():<15}: {v:.4f}")
         
+        # Generate model identifier for filenames
+        model_id = args.model_name if args.model_name else os.path.splitext(os.path.basename(args.checkpoint_path))[0]
+        
+        # Plot ROC curve
+        roc_plot_path = os.path.join(args.output_dir, f"{model_id}_roc_{level}_level.png")
+        fpr, tpr, thresholds = plot_roc_curve(
+            meta_labels, 
+            meta_probs, 
+            roc_plot_path,
+            title=f"ROC Curve - Metastasis Prediction ({level.upper()} Level)",
+            auc_score=meta_metrics['auc']
+        )
+        
+        # Plot confusion matrix (unnormalized)
+        cm_plot_path = os.path.join(args.output_dir, f"{model_id}_cm_{level}_level.png")
+        plot_confusion_matrix(
+            meta_labels,
+            meta_preds,
+            cm_plot_path,
+            title=f"Confusion Matrix - Metastasis Prediction ({level.upper()} Level)",
+            class_names=['Negative', 'Positive'],
+            normalize=False
+        )
+        
+        # Plot confusion matrix (normalized)
+        cm_norm_plot_path = os.path.join(args.output_dir, f"{model_id}_cm_normalized_{level}_level.png")
+        plot_confusion_matrix(
+            meta_labels,
+            meta_preds,
+            cm_norm_plot_path,
+            title=f"Confusion Matrix - Metastasis Prediction ({level.upper()} Level)",
+            class_names=['Negative', 'Positive'],
+            normalize=True
+        )
+        
+        # Optionally save ROC data
+        if args.save_roc_data:
+            roc_data_path = os.path.join(args.output_dir, f"{model_id}_roc_{level}_level.json")
+            save_roc_data(meta_labels, meta_probs, roc_data_path, level=level)
+        
         return meta_metrics
     
     # Bag-level metrics
-    meta_metrics_bag = log_compute_metrics(meta_labels, meta_probs, meta_preds, note="PER BAG LEVEL")
+    meta_metrics_bag = log_compute_metrics(meta_labels, meta_probs, meta_preds, note="PER BAG LEVEL", level="bag")
     log_to_csv(args, meta_metrics_bag, note="PER BAG LEVEL")
     
     # Patient-level aggregation
@@ -207,7 +361,7 @@ def test(model, dataloader, args):
     # Patient-level metrics
     meta_metrics_patient = log_compute_metrics(
         meta_labels_patient, meta_probs_patient, meta_preds_patient, 
-        note="PER PATIENT LEVEL"
+        note="PER PATIENT LEVEL", level="patient"
     )
     log_to_csv(args, meta_metrics_patient, note="PER PATIENT LEVEL")
 

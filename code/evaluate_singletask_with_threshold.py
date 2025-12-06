@@ -168,7 +168,7 @@ def log_to_csv(args, meta_metrics, note, threshold_used):
     
     print(f"\nResults logged to: {csv_path}")
 
-def patient_level_metrics(agg_df):
+def patient_level_metrics(agg_df, threshold):
     """
     Aggregate predictions and labels at patient level.
     For metastasis: if any bag from a patient is positive, the patient is positive.
@@ -181,9 +181,10 @@ def patient_level_metrics(agg_df):
         patient_row = agg_df[agg_df['patient_id'] == p]
         # If any instance of the patient is positive, then the patient is positive
         meta_labels.append(int(np.max(patient_row['meta_label'])))
-        meta_preds.append(int(np.max(patient_row['meta_preds'])))
-        # Average probability across all bags for this patient
         meta_probs.append(float(np.mean(patient_row['meta_probs'])))
+        meta_preds.append(1 if float(np.mean(patient_row['meta_probs'])) > threshold else 0)
+        # Average probability across all bags for this patient
+        
     
     return meta_labels, meta_probs, meta_preds
 
@@ -259,7 +260,7 @@ def test(model, dataloader, args, meta_threshold=0.5):
     agg_df = pd.DataFrame(agg_dict)
     
     # Get patient-level metrics
-    meta_labels_patient, meta_probs_patient, meta_preds_patient = patient_level_metrics(agg_df)
+    meta_labels_patient, meta_probs_patient, meta_preds_patient = patient_level_metrics(agg_df, meta_threshold)
     
     # Patient-level metrics
     meta_metrics_patient = log_compute_metrics(
